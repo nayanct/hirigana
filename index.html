@@ -577,8 +577,23 @@ function buildRomajiChoices(it){
   renderChoices(shuffle(out).map(x=>({label:x.romaji,value:x.romaji})),it.romaji,false);
 }
 function buildKanaChoices(it){
-  const opts=shuffle([it,...candidateDistractors(it)]).slice(0,4);
-  renderChoices(opts.map(x=>({label:x.kana,value:x.id})),it.id,true);
+  // Always keep the correct kana in the choices. Shuffling the entire
+  // candidate list before slicing could remove the correct answer.
+  //
+  // Also avoid distractors with the same reading (for example お / を for
+  // "o" or わ / particle は for "wa"), because the reading-only prompt
+  // would otherwise have more than one legitimately correct answer.
+  const distractors=[];
+  const usedKana=new Set([it.kana]);
+  for(const x of candidateDistractors(it)){
+    if(normalize(x.romaji)===normalize(it.romaji))continue;
+    if(usedKana.has(x.kana))continue;
+    usedKana.add(x.kana);
+    distractors.push(x);
+    if(distractors.length===3)break;
+  }
+  const opts=shuffle([it,...distractors]);
+  renderChoices(opts.map(x=>({label:x.kana,value:x.kana})),it.kana,true);
 }
 function renderChoices(opts,target,jp){
   const box=$('#choiceArea');box.innerHTML='';box.hidden=false;
