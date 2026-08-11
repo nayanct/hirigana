@@ -392,6 +392,7 @@ let answerMode=data.prefs?.answerMode||'choice';
 let a11y=Object.assign({theme:'light',textSize:100,font:'system',customFont:''},data.prefs?.accessibility||{});
 let session=null;
 let pendingFeel=null;
+let activeAudio=null;
 
 function emptyData(){return{items:{},sessions:0,total:0,correct:0,prefs:{}}}
 function load(){
@@ -672,10 +673,66 @@ function endSession(){
   $('#doneText').textContent=session.answered?`${session.answered} answered · ${acc}% correct · ${session.newCount} new`:`${session.newCount} new kana introduced`;
   show('done');
 }
+
+function soundFileName(it){
+  const name=normalize(it.romaji)
+    .replace(/[^a-z0-9]+/g,'-')
+    .replace(/^-+|-+$/g,'');
+  return name?`sounds/${name}.mp3`:'';
+}
+
+function speakTTS(it){
+  if(!('speechSynthesis' in window)){
+    toast('Sound unavailable');
+    return;
+  }
+  speechSynthesis.cancel();
+  const u=new SpeechSynthesisUtterance(it.kana);
+  u.lang='ja-JP';
+  u.rate=.75;
+  const ja=speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith('ja'));
+  if(ja)u.voice=ja;
+  speechSynthesis.speak(u);
+}
+
 function speak(){
-  if(!session?.current||$('#soundBtn').disabled||!('speechSynthesis'in window)){toast('Sound unavailable');return}
-  speechSynthesis.cancel();const u=new SpeechSynthesisUtterance(session.current.kana);u.lang='ja-JP';u.rate=.75;
-  const ja=speechSynthesis.getVoices().find(v=>v.lang?.toLowerCase().startsWith('ja'));if(ja)u.voice=ja;speechSynthesis.speak(u);
+  if(!session?.current||$('#soundBtn').disabled){
+    toast('Sound unavailable');
+    return;
+  }
+
+  const it=session.current;
+
+  if(activeAudio){
+    activeAudio.pause();
+    activeAudio.currentTime=0;
+    activeAudio=null;
+  }
+  if('speechSynthesis' in window)speechSynthesis.cancel();
+
+  const src=soundFileName(it);
+  if(!src){
+    speakTTS(it);
+    return;
+  }
+
+  const audio=new Audio(src);
+  activeAudio=audio;
+  let fellBack=false;
+
+  const fallback=()=>{
+    if(fellBack||activeAudio!==audio)return;
+    fellBack=true;
+    activeAudio=null;
+    speakTTS(it);
+  };
+
+  audio.addEventListener('ended',()=>{
+    if(activeAudio===audio)activeAudio=null;
+  },{once:true});
+
+  audio.addEventListener('error',fallback,{once:true});
+  audio.play().catch(fallback);
 }
 
 
