@@ -339,11 +339,11 @@ h1,.done h2,.feel h2,.a11yHead h2{font-weight:600}
 
 <section id="feelScreen" class="screen feel">
   <h2>How does this one feel?</h2>
-  <p>Your answer changes how often it comes back.</p>
+  <p>Shaky or “Don’t understand” pauses new kana until this one feels steadier.</p>
   <div id="feelKana" class="feelKana jp"></div>
   <div id="feelReading" class="feelReading"></div>
   <div class="feelChoices">
-    <button data-feel="hard">Hard</button>
+    <button data-feel="hard">Don’t understand</button>
     <button data-feel="shaky">Shaky</button>
     <button data-feel="okay">Okay</button>
     <button data-feel="easy">Easy</button>
@@ -466,7 +466,7 @@ function startSession(){
   if(!selected.size){selected.add('gojuon')}
   const pool=ALL.filter(x=>selected.has(x.cat)).sort(curriculum);
   if(!pool.length)return;
-  session={pool,active:new Set(),history:[],recentResults:[],recentItems:[],answered:0,correct:0,streak:0,newCount:0,answeredSinceUnlock:0,nextFeelAt:4+Math.floor(Math.random()*3),current:null,kind:null,startMs:0,locked:false};
+  session={pool,active:new Set(),history:[],recentResults:[],recentItems:[],answered:0,correct:0,streak:0,newCount:0,answeredSinceUnlock:0,nextFeelAt:4+Math.floor(Math.random()*3),current:null,kind:null,startMs:0,locked:false,struggle:null};
   seedActive();
   save();show('study');nextCard();
 }
@@ -486,6 +486,11 @@ function avgActiveMastery(){
 }
 function recentAccuracy(){const xs=session.recentResults.slice(-8);return xs.length?xs.filter(Boolean).length/xs.length:1}
 function canUnlock(){
+  // A "Shaky" / "Don't understand" rating is a hard gate on new material.
+  // We do not unlock another kana until the flagged kana has been
+  // successfully recalled again (twice for "Shaky", three times for
+  // "Don't understand").
+  if(session.struggle)return false;
   const unseen=session.pool.find(x=>state(x.id).seen===0&&!session.active.has(x.id));if(!unseen)return false;
   if([...session.active].some(id=>state(id).seen===0))return false;
   const gap=learnMode==='progressive'?7:5;
@@ -520,6 +525,25 @@ function priority(it){
 function chooseItem(){
   maybeUnlock();
   let list=[...session.active].map(id=>BY_ID[id]).filter(Boolean);
+
+  // When the learner flags a kana as shaky, keep the session focused on it.
+  // Give one different question as spacing, then bring the shaky kana back.
+  if(session.struggle){
+    const target=BY_ID[session.struggle.id];
+    if(target&&list.some(x=>x.id===target.id)){
+      const last=session.history[session.history.length-1];
+      if(session.struggle.gap>=1&&last!==target.id)return target;
+      const others=list.filter(x=>x.id!==target.id&&state(x.id).seen>0);
+      if(others.length){
+        const recent=session.history.slice(-2);
+        const spaced=others.filter(x=>!recent.includes(x.id));
+        const choices=spaced.length?spaced:others;
+        return choices.sort((a,b)=>priority(b)-priority(a))[0];
+      }
+      return target;
+    }
+  }
+
   const fresh=list.filter(x=>state(x.id).seen===0).sort(curriculum);
   if(fresh.length)return fresh[0];
   const recent=session.history.slice(-2);
@@ -612,6 +636,29 @@ function score(value,ok,button){
   session.recentResults.push(ok);if(session.recentResults.length>12)session.recentResults.shift();
   session.recentItems.push(it.id);if(session.recentItems.length>10)session.recentItems.shift();
   if(ok){s.correct++;s.streak++;session.correct++;session.streak++;data.correct++}else{s.wrong++;s.streak=0;s.lapses++;session.streak=0}
+
+  // Resolve a learner-declared struggle through successful recall, not merely
+  // by waiting a few questions. New material stays locked while this exists.
+  if(session.struggle){
+    if(it.id===session.struggle.id){
+      if(ok){
+        session.struggle.needed--;
+        if(session.struggle.needed<=0){
+          session.struggle=null;
+          // Stabilizing a struggle starts a fresh unlock interval. This keeps
+          // the next new kana from appearing immediately after remediation.
+          session.answeredSinceUnlock=0;
+        }else session.struggle.gap=0;
+      }else{
+        // A miss means it still needs reinforcement.
+        session.struggle.needed=Math.max(session.struggle.needed,session.struggle.level==='hard'?3:2);
+        session.struggle.gap=0;
+      }
+    }else{
+      session.struggle.gap++;
+    }
+  }
+
   const speed=ok?(elapsed<1800?1:elapsed<3500?.86:elapsed<6500?.68:.5):0;
   const strengthFactor=answerMode==='type'?1:.86;
   if(ok){s.strength=clamp(s.strength+(.14+.15*speed)*strengthFactor,0,1.4);s.mastery=clamp(s.mastery+(1-s.mastery)*(.14+.15*speed)*strengthFactor,0,1)}
@@ -661,8 +708,22 @@ function applyFeeling(kind){
   if(!pendingFeel||!session)return;
   const s=state(pendingFeel.id),map={hard:-2,shaky:-1,okay:1,easy:2},v=map[kind];
   s.feeling=clamp(s.feeling*.65+v*.35,-2,2);s.feelCount++;
-  if(kind==='hard'){s.dueAt=Math.min(s.dueAt||Infinity,now()+35000);s.mastery*=.93}
-  if(kind==='shaky')s.dueAt=Math.min(s.dueAt||Infinity,now()+90000);
+
+  if(kind==='hard'||kind==='shaky'){
+    // Explicit learner feedback outranks the normal unlock cadence.
+    // Shaky: prove it twice. Don't understand: prove it three times.
+    // Each proof is separated by another question when possible.
+    session.struggle={
+      id:pendingFeel.id,
+      level:kind,
+      needed:kind==='hard'?3:2,
+      gap:0
+    };
+    session.answeredSinceUnlock=0;
+  }
+
+  if(kind==='hard'){s.dueAt=Math.min(s.dueAt||Infinity,now()+35000);s.mastery*=.90}
+  if(kind==='shaky'){s.dueAt=Math.min(s.dueAt||Infinity,now()+60000);s.mastery*=.96}
   if(kind==='easy'){s.dueAt=Math.max(s.dueAt,now()+4*60000);s.mastery=clamp(s.mastery+.025,0,1)}
   save();pendingFeel=null;show('study');nextCard();
 }
